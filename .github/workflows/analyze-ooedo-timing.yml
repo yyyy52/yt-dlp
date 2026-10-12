@@ -1,0 +1,73 @@
+name: Analyze Ooedo Timing
+
+on:
+  push:
+    paths:
+      - '.github/workflows/analyze-ooedo-timing.yml'
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install -U pip numpy 'yt-dlp[default]' faster-whisper
+          python -m pip install -U torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -U demucs
+      - name: Fetch and isolate vocals
+        run: |
+          yt-dlp --no-playlist -f 'bestaudio/best' -x --audio-format wav --audio-quality 0 \
+            -o 'ooedo.%(ext)s' 'https://rutube.ru/video/d9ae4c17bf1deeae0e935008c095fda6/'
+          python -m demucs -n htdemucs --two-stems=vocals -o demucs_out ooedo.wav
+          cp demucs_out/htdemucs/ooedo/vocals.wav vocals.wav
+      - name: Transcribe vocals with word timestamps
+        run: |
+          python - <<'PY'
+          import json
+          from faster_whisper import WhisperModel
+
+          model = WhisperModel('large-v3-turbo', device='cpu', compute_type='int8', cpu_threads=4)
+          segs, info = model.transcribe(
+              'vocals.wav',
+              language='ja',
+              task='transcribe',
+              beam_size=5,
+              word_timestamps=True,
+              vad_filter=False,
+              condition_on_previous_text=False,
+              temperature=0.0,
+              log_progress=True,
+          )
+          out={'language': info.language, 'duration': info.duration, 'segments': []}
+          for s in segs:
+              row={
+                  'start':s.start,'end':s.end,'text':s.text,
+                  'avg_logprob':getattr(s,'avg_logprob',None),
+                  'no_speech_prob':getattr(s,'no_speech_prob',None),
+                  'words':[]
+              }
+              for w in (s.words or []):
+                  row['words'].append({'start':w.start,'end':w.end,'word':w.word,'probability':w.probability})
+              out['segments'].append(row)
+          with open('ooedo_whisper_words.json','w',encoding='utf-8') as f:
+              json.dump(out,f,ensure_ascii=False,indent=2)
+          with open('ooedo_whisper.txt','w',encoding='utf-8') as f:
+              for s in out['segments']:
+                  f.write(f"[{s['start']:.2f}-{s['end']:.2f}] {s['text']}\n")
+          print(open('ooedo_whisper.txt',encoding='utf-8').read())
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ooedo-timing-analysis
+          path: |
+            ooedo_whisper_words.json
+            ooedo_whisper.txt
+          retention-days: 1
