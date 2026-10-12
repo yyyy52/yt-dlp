@@ -1,0 +1,53 @@
+name: Fetch Propose Official Preview
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-propose-preview.yml'
+  workflow_dispatch:
+
+jobs:
+  fetch-preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch official iTunes metadata and preview
+        run: |
+          python - <<'PY'
+          import json, urllib.request, urllib.parse
+          album_id = '1815738385'
+          api = 'https://itunes.apple.com/lookup?' + urllib.parse.urlencode({
+              'id': album_id, 'entity': 'song', 'country': 'JP'
+          })
+          with urllib.request.urlopen(api, timeout=30) as r:
+              data = json.load(r)
+          print(json.dumps(data, ensure_ascii=False, indent=2)[:5000])
+          with open('itunes_lookup.json','w',encoding='utf-8') as f:
+              json.dump(data,f,ensure_ascii=False,indent=2)
+          tracks = [x for x in data.get('results',[]) if x.get('wrapperType') == 'track']
+          if not tracks:
+              raise RuntimeError('No track returned from iTunes lookup')
+          track = tracks[0]
+          preview = track.get('previewUrl')
+          if not preview:
+              raise RuntimeError(f'No previewUrl in track: {track}')
+          print('track:', track.get('trackName'), 'artist:', track.get('artistName'), 'duration_ms:', track.get('trackTimeMillis'))
+          print('preview:', preview)
+          req = urllib.request.Request(preview, headers={'User-Agent':'Mozilla/5.0'})
+          with urllib.request.urlopen(req, timeout=60) as r, open('propose_official_preview.m4a','wb') as f:
+              f.write(r.read())
+          PY
+          ls -lh itunes_lookup.json propose_official_preview.m4a
+      - name: Upload preview artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: propose-official-preview
+          path: |
+            propose_official_preview.m4a
+            itunes_lookup.json
+          if-no-files-found: error
+          retention-days: 1
