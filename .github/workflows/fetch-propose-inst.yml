@@ -1,0 +1,31 @@
+name: Fetch Propose Official Inst
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-propose-inst.yml'
+  workflow_dispatch:
+
+jobs:
+  fetch-inst:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install yt-dlp
+        run: python -m pip install -U 'yt-dlp[default]'
+      - name: Fetch official Piapro audio
+        run: |
+          set -x
+          yt-dlp --verbose -f 'bestaudio/best' --write-info-json -o 'propose_inst.%(ext)s' 'https://piapro.jp/t/Dc5T'
+          ls -lh propose_inst.*
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: propose-official-inst
+          path: propose_inst.*
+          if-no-files-found: error
+          retention-days: 1
