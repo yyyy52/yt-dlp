@@ -1,0 +1,60 @@
+name: Fetch Ooedo Audio
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-ooedo-audio.yml'
+  workflow_dispatch:
+
+jobs:
+  fetch-audio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install -U numpy 'yt-dlp[default]'
+          python -m pip install -U torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -U demucs
+          yt-dlp --version
+
+      - name: Download classic original from Niconico
+        run: |
+          yt-dlp \
+            --no-playlist \
+            -f 'bestaudio/best' \
+            -x --audio-format wav --audio-quality 0 \
+            --write-info-json \
+            -o 'ooedo_original.%(ext)s' \
+            'https://www.nicovideo.jp/watch/sm24186563'
+          ls -lh ooedo_original.*
+
+      - name: Separate vocals
+        run: |
+          python -m demucs -n htdemucs --two-stems=vocals -o demucs_out ooedo_original.wav
+          cp demucs_out/htdemucs/ooedo_original/vocals.wav ooedo_vocals.wav
+          cp demucs_out/htdemucs/ooedo_original/no_vocals.wav ooedo_no_vocals.wav
+          ls -lh ooedo_vocals.wav ooedo_no_vocals.wav
+
+      - name: Upload analysis artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ooedo-original-analysis
+          path: |
+            ooedo_original.wav
+            ooedo_original.info.json
+            ooedo_vocals.wav
+            ooedo_no_vocals.wav
+          if-no-files-found: error
+          retention-days: 1
