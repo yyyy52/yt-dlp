@@ -9,7 +9,7 @@ on:
 jobs:
   fetch-audio:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,14 +24,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
           python -m pip install --upgrade pip
-          python -m pip install -U 'yt-dlp[default]'
+          python -m pip install -U 'yt-dlp[default]' demucs
           yt-dlp --version
           ffmpeg -version | head -n 1
 
       - name: Download official audio from Niconico
         run: |
           yt-dlp \
-            --verbose \
             --no-playlist \
             -f 'bestaudio/best' \
             -x --audio-format wav --audio-quality 0 \
@@ -40,12 +39,21 @@ jobs:
             'https://www.nicovideo.jp/watch/sm45388910'
           ls -lh propose_original.*
 
+      - name: Separate lead vocal
+        run: |
+          python -m demucs -n htdemucs --two-stems=vocals -o demucs_out propose_original.wav
+          cp demucs_out/htdemucs/propose_original/vocals.wav propose_vocals.wav
+          cp demucs_out/htdemucs/propose_original/no_vocals.wav propose_no_vocals.wav
+          ls -lh propose_vocals.wav propose_no_vocals.wav
+
       - name: Upload analysis artifact
         uses: actions/upload-artifact@v4
         with:
-          name: propose-original-audio
+          name: propose-original-analysis
           path: |
             propose_original.wav
             propose_original.info.json
+            propose_vocals.wav
+            propose_no_vocals.wav
           if-no-files-found: error
           retention-days: 1
