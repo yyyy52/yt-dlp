@@ -19,27 +19,33 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install yt-dlp
+      - name: Install dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
           python -m pip install --upgrade pip
           python -m pip install -U 'yt-dlp[default]'
           yt-dlp --version
+          ffmpeg -version | head -n 1
 
-      - name: Download official Niconico audio
+      - name: Download official-mirror audio from Bilibili
         run: |
           yt-dlp \
             --verbose \
             --no-playlist \
             -f 'bestaudio/best' \
+            -x --audio-format wav --audio-quality 0 \
             --write-info-json \
             -o 'propose_original.%(ext)s' \
-            'https://www.nicovideo.jp/watch/sm45388910'
+            'https://www.bilibili.com/video/BV1tnTNzfEYg/'
           ls -lh propose_original.*
 
       - name: Upload analysis artifact
         uses: actions/upload-artifact@v4
         with:
           name: propose-original-audio
-          path: propose_original.*
+          path: |
+            propose_original.wav
+            propose_original.info.json
           if-no-files-found: error
           retention-days: 1
