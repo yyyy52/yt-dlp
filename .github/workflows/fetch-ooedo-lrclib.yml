@@ -1,0 +1,32 @@
+name: Fetch Ooedo LRCLIB
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-ooedo-lrclib.yml'
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch LRCLIB candidates
+        run: |
+          python - <<'PY'
+          import json, urllib.parse, urllib.request
+          qs=urllib.parse.urlencode({'track_name':'オオエドランヴ','artist_name':'Reol'})
+          url='https://lrclib.net/api/search?'+qs
+          req=urllib.request.Request(url, headers={'User-Agent':'ChatGPT-analysis/1.0'})
+          with urllib.request.urlopen(req, timeout=30) as r:
+              data=json.load(r)
+          with open('lrclib.json','w',encoding='utf-8') as f:
+              json.dump(data,f,ensure_ascii=False,indent=2)
+          for i,x in enumerate(data):
+              print(i, x.get('trackName'), x.get('artistName'), x.get('duration'), 'synced=', bool(x.get('syncedLyrics')))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ooedo-lrclib
+          path: lrclib.json
+          retention-days: 1
