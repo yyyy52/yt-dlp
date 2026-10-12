@@ -1,0 +1,89 @@
+name: Analyze Propose Vocal Timestamps
+
+on:
+  push:
+    paths:
+      - '.github/workflows/analyze-propose-whisper.yml'
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install -U 'yt-dlp[default]' demucs faster-whisper
+
+      - name: Download verified master source
+        run: |
+          yt-dlp \
+            --no-playlist \
+            -f 'bestaudio/best' \
+            -o 'propose_source.%(ext)s' \
+            'https://www.nicovideo.jp/watch/sm45388910'
+          ffmpeg -y -loglevel error -i propose_source.* -ar 44100 -ac 2 propose_source.wav
+
+      - name: Separate vocals
+        run: |
+          python -m demucs --two-stems=vocals -n htdemucs -o separated propose_source.wav
+          find separated -type f -maxdepth 4 -print
+
+      - name: Transcribe vocals with word timestamps
+        run: |
+          python - <<'PY'
+          import json, glob
+          from faster_whisper import WhisperModel
+
+          vocal = glob.glob('separated/**/vocals.wav', recursive=True)[0]
+          model = WhisperModel('large-v3-turbo', device='cpu', compute_type='int8')
+          segments, info = model.transcribe(
+              vocal,
+              language='ja',
+              beam_size=5,
+              word_timestamps=True,
+              vad_filter=False,
+              condition_on_previous_text=True,
+          )
+          out = {
+              'language': info.language,
+              'duration': info.duration,
+              'segments': []
+          }
+          for seg in segments:
+              item = {
+                  'start': seg.start,
+                  'end': seg.end,
+                  'text': seg.text,
+                  'words': []
+              }
+              for w in (seg.words or []):
+                  item['words'].append({
+                      'start': w.start,
+                      'end': w.end,
+                      'word': w.word,
+                      'probability': w.probability,
+                  })
+              out['segments'].append(item)
+          with open('propose_word_timestamps.json','w',encoding='utf-8') as f:
+              json.dump(out,f,ensure_ascii=False,indent=2)
+          print(json.dumps(out, ensure_ascii=False)[:10000])
+          PY
+
+      - name: Upload analysis artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: propose-vocal-analysis
+          path: |
+            propose_word_timestamps.json
+            separated/**/vocals.wav
+          if-no-files-found: error
+          retention-days: 1
