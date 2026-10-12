@@ -1,0 +1,52 @@
+name: Align Utakata Words
+
+on:
+  push:
+    paths:
+      - '.github/workflows/align-utakata-words.yml'
+  workflow_dispatch:
+
+jobs:
+  align:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Download verified analysis artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 38212679328 -n utakata-analysis -D audio
+          ls -lh audio/utakata_vocals.wav
+      - name: Install faster-whisper
+        run: |
+          python -m pip install -U faster-whisper
+      - name: Transcribe with word timestamps
+        run: |
+          python - <<'PY'
+          import json
+          from faster_whisper import WhisperModel
+          model=WhisperModel('large-v3-turbo', device='cpu', compute_type='int8')
+          segs,info=model.transcribe('audio/utakata_vocals.wav', language='ja', beam_size=5,
+              word_timestamps=True, vad_filter=False, condition_on_previous_text=True,
+              initial_prompt='泡沫の夜 nqrse。日本語の歌とラップ。')
+          out=[]
+          for s in segs:
+              words=[]
+              for w in (s.words or []):
+                  words.append({'start':w.start,'end':w.end,'word':w.word,'probability':w.probability})
+              out.append({'start':s.start,'end':s.end,'text':s.text,'words':words})
+          print('segments',len(out),'words',sum(len(x['words']) for x in out))
+          open('utakata_whisper_words.json','w',encoding='utf-8').write(json.dumps({'language':info.language,'segments':out},ensure_ascii=False,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: utakata-word-timing
+          retention-days: 1
+          path: utakata_whisper_words.json
