@@ -8,7 +8,7 @@ on:
 
 jobs:
   fetch-audio:
-    runs-on: ubuntu-latest
+    runs-on: macos-14
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -19,25 +19,22 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
+      - name: Install yt-dlp
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
           python -m pip install --upgrade pip
-          python -m pip install -U 'yt-dlp[default]'
+          python -m pip install -U 'yt-dlp[default]' curl-cffi
           node --version
-          ffmpeg -version | head -n 1
           yt-dlp --version
 
-      - name: Download official audio
+      - name: Download official bestaudio
         run: |
           yt-dlp \
             --verbose \
             --no-playlist \
             --js-runtimes node \
-            --extractor-args 'youtube:player_client=web_embedded,android_vr,default' \
+            --impersonate chrome \
+            --extractor-args 'youtube:player_client=tv,web_embedded,android_vr,default' \
             -f 'bestaudio/best' \
-            -x --audio-format wav --audio-quality 0 \
             --write-info-json \
             -o 'propose_original.%(ext)s' \
             'https://www.youtube.com/watch?v=VDdLF1YubI0'
@@ -47,8 +44,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: propose-original-audio
-          path: |
-            propose_original.wav
-            propose_original.info.json
+          path: propose_original.*
           if-no-files-found: error
           retention-days: 1
