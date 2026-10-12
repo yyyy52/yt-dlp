@@ -22,14 +22,15 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg libchromaprint-tools
           python -m pip install --upgrade pip
           python -m pip install -U numpy 'yt-dlp[default]'
           python -m pip install -U torch torchaudio --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -U demucs
           yt-dlp --version
+          fpcalc -version
 
-      - name: Download classic full recording from Niconico
+      - name: Download 3m01 mirror
         run: |
           yt-dlp \
             --no-playlist \
@@ -37,10 +38,8 @@ jobs:
             -x --audio-format wav --audio-quality 0 \
             --write-info-json \
             -o 'ooedo_original.%(ext)s' \
-            'https://www.nicovideo.jp/watch/sm45339370'
+            'https://rutube.ru/video/d9ae4c17bf1deeae0e935008c095fda6/'
           ls -lh ooedo_original.*
-          DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 ooedo_original.wav)
-          echo "duration=$DURATION"
           python - <<'PY'
           import json, subprocess, sys
           with open('ooedo_original.info.json', encoding='utf-8') as f:
@@ -50,8 +49,72 @@ jobs:
           print('title=', d.get('title'))
           print('uploader=', d.get('uploader'))
           print('duration=', dur)
-          if not (175 <= dur <= 187):
-              sys.exit(f'Unexpected duration {dur}; expected classic full track around 3:01')
+          if not (179 <= dur <= 183.5):
+              sys.exit(f'Unexpected duration {dur}; expected classic release around 3:01')
+          PY
+
+      - name: Download Apple Music preview
+        run: |
+          python - <<'PY'
+          import json, urllib.request
+          url='https://itunes.apple.com/lookup?id=1090291459&country=us'
+          with urllib.request.urlopen(url, timeout=30) as r:
+              data=json.load(r)
+          print('resultCount=', data.get('resultCount'))
+          item=data['results'][0]
+          print('trackName=', item.get('trackName'))
+          print('artistName=', item.get('artistName'))
+          print('trackTimeMillis=', item.get('trackTimeMillis'))
+          p=item.get('previewUrl')
+          if not p:
+              raise SystemExit('Apple previewUrl missing')
+          print('previewUrl=', p)
+          urllib.request.urlretrieve(p, 'apple_preview.m4a')
+          PY
+          ffmpeg -y -i apple_preview.m4a -ar 44100 -ac 2 apple_preview.wav >/dev/null 2>&1
+          ls -lh apple_preview.*
+
+      - name: Fingerprint-verify mirror against Apple preview
+        run: |
+          python - <<'PY'
+          import json, subprocess, math, sys
+
+          def fp(path):
+              out=subprocess.check_output(['fpcalc','-raw','-json',path], text=True)
+              d=json.loads(out)
+              return d['fingerprint'], float(d['duration'])
+
+          full, fdur = fp('ooedo_original.wav')
+          prev, pdur = fp('apple_preview.wav')
+          print('full fp frames=', len(full), 'duration=', fdur)
+          print('preview fp frames=', len(prev), 'duration=', pdur)
+
+          # Chromaprint emits ~8 fps. Search preview fingerprint as a subsequence
+          # of the full recording using mean 32-bit Hamming distance.
+          n=len(prev)
+          if n < 30 or len(full) < n:
+              raise SystemExit('fingerprint too short')
+
+          # trim a few edge frames because preview encoders may fade/cut boundaries
+          trim=max(5, min(20, n//12))
+          p=prev[trim:n-trim]
+          m=len(p)
+          best=(999, None)
+          for off in range(0, len(full)-m+1):
+              total=0
+              for a,b in zip(p, full[off:off+m]):
+                  total += (int(a)^int(b)).bit_count()
+              score=total/m
+              if score < best[0]:
+                  best=(score, off)
+          score, off=best
+          seconds=off/7.8
+          print(f'best_mean_hamming={score:.3f} bits/frame offset_frame={off} approx_offset={seconds:.2f}s')
+          # Identical-master transcodes are normally far below unrelated audio (~16 bits/frame).
+          # Keep threshold deliberately loose for codec/mastering differences.
+          if score > 7.0:
+              raise SystemExit(f'Fingerprint mismatch: {score:.3f} > 7.0')
+          print('FINGERPRINT VERIFIED')
           PY
 
       - name: Separate vocals
@@ -68,6 +131,7 @@ jobs:
           path: |
             ooedo_original.wav
             ooedo_original.info.json
+            apple_preview.m4a
             ooedo_vocals.wav
             ooedo_no_vocals.wav
           if-no-files-found: error
