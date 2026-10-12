@@ -19,77 +19,21 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install requests
-        run: python -m pip install -U requests
-
-      - name: Download official Bilibili DASH audio
+      - name: Install yt-dlp
         run: |
-          python - <<'PY'
-          import json, requests
+          python -m pip install --upgrade pip
+          python -m pip install -U 'yt-dlp[default]'
+          yt-dlp --version
 
-          bvid = 'BV1tnTNzfEYg'
-          headers = {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
-              'Referer': f'https://www.bilibili.com/video/{bvid}/',
-              'Origin': 'https://www.bilibili.com',
-          }
-
-          s = requests.Session()
-          s.headers.update(headers)
-
-          view = s.get('https://api.bilibili.com/x/web-interface/view', params={'bvid': bvid}, timeout=30)
-          print('view status:', view.status_code)
-          print('view head:', view.text[:500])
-          view.raise_for_status()
-          vj = view.json()
-          if vj.get('code') != 0:
-              raise RuntimeError(vj)
-          cid = vj['data']['cid']
-          info = {
-              'bvid': bvid,
-              'cid': cid,
-              'title': vj['data'].get('title'),
-              'owner': vj['data'].get('owner'),
-              'duration': vj['data'].get('duration'),
-          }
-          print('video:', json.dumps(info, ensure_ascii=False))
-
-          play = s.get('https://api.bilibili.com/x/player/playurl', params={
-              'bvid': bvid,
-              'cid': cid,
-              'qn': 80,
-              'fnval': 16,
-              'fnver': 0,
-              'fourk': 1,
-          }, timeout=30)
-          print('play status:', play.status_code)
-          print('play head:', play.text[:500])
-          play.raise_for_status()
-          pj = play.json()
-          if pj.get('code') != 0:
-              raise RuntimeError(pj)
-          audios = (pj.get('data') or {}).get('dash', {}).get('audio') or []
-          if not audios:
-              raise RuntimeError('No DASH audio streams returned')
-          audios.sort(key=lambda x: (x.get('bandwidth', 0), x.get('id', 0)), reverse=True)
-          a = audios[0]
-          audio_url = a.get('baseUrl') or a.get('base_url')
-          print('audio id/bw:', a.get('id'), a.get('bandwidth'))
-
-          r = s.get(audio_url, stream=True, timeout=60)
-          print('audio status:', r.status_code, r.headers.get('content-type'), r.headers.get('content-length'))
-          r.raise_for_status()
-          with open('propose_original.m4s', 'wb') as f:
-              for chunk in r.iter_content(1024 * 1024):
-                  if chunk:
-                      f.write(chunk)
-
-          info['audio_id'] = a.get('id')
-          info['audio_bandwidth'] = a.get('bandwidth')
-          info['audio_mime'] = a.get('mimeType') or a.get('mime_type')
-          with open('propose_original.info.json', 'w', encoding='utf-8') as f:
-              json.dump(info, f, ensure_ascii=False, indent=2)
-          PY
+      - name: Download official Niconico audio
+        run: |
+          yt-dlp \
+            --verbose \
+            --no-playlist \
+            -f 'bestaudio/best' \
+            --write-info-json \
+            -o 'propose_original.%(ext)s' \
+            'https://www.nicovideo.jp/watch/sm45388910'
           ls -lh propose_original.*
 
       - name: Upload analysis artifact
