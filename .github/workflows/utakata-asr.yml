@@ -1,0 +1,50 @@
+name: Utakata ASR Timing
+
+on:
+  push:
+    paths:
+      - '.github/workflows/utakata-asr.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  transcribe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: utakata-analysis
+          path: input
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 38212679328
+      - name: Install faster-whisper
+        run: python -m pip install -U faster-whisper
+      - name: Transcribe vocal stem for timing only
+        run: |
+          python - <<'PY'
+          import json
+          from faster_whisper import WhisperModel
+          model=WhisperModel('large-v3-turbo',device='cpu',compute_type='int8')
+          segs,info=model.transcribe('input/utakata_vocals.wav',language='ja',beam_size=5,word_timestamps=True,vad_filter=False,condition_on_previous_text=False)
+          out=[]
+          for s in segs:
+              words=[]
+              for w in (s.words or []):
+                  words.append({'start':w.start,'end':w.end,'word':w.word,'probability':w.probability})
+              out.append({'start':s.start,'end':s.end,'text':s.text,'words':words,'avg_logprob':s.avg_logprob,'no_speech_prob':s.no_speech_prob})
+          with open('utakata_asr.json','w',encoding='utf-8') as f: json.dump({'language':info.language,'segments':out},f,ensure_ascii=False,indent=2)
+          print('segments',len(out),'words',sum(len(x['words']) for x in out))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: utakata-asr
+          path: utakata_asr.json
+          retention-days: 1
