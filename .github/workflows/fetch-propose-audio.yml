@@ -28,7 +28,7 @@ jobs:
           yt-dlp --version
           ffmpeg -version | head -n 1
 
-      - name: Download official-mirror audio from Bilibili
+      - name: Download official audio from Niconico
         run: |
           yt-dlp \
             --verbose \
@@ -37,7 +37,7 @@ jobs:
             -x --audio-format wav --audio-quality 0 \
             --write-info-json \
             -o 'propose_original.%(ext)s' \
-            'https://www.bilibili.com/video/BV1tnTNzfEYg/'
+            'https://www.nicovideo.jp/watch/sm45388910'
           ls -lh propose_original.*
 
       - name: Upload analysis artifact
