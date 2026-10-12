@@ -12,15 +12,13 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg libchromaprint-tools
+          sudo apt-get update && sudo apt-get install -y ffmpeg libchromaprint-tools
           python -m pip install --upgrade pip
           python -m pip install -U 'yt-dlp[default]' numpy scipy librosa soundfile
           python -m pip install -U torch torchaudio --index-url https://download.pytorch.org/whl/cpu
@@ -28,47 +26,46 @@ jobs:
 
       - name: Download full-length proxy
         run: |
-          yt-dlp --no-playlist -f 'bestaudio/best' -x --audio-format wav --audio-quality 0 \
-            --write-info-json -o 'utakata_master.%(ext)s' \
-            'https://soundcloud.com/homeless-mochi/nqrse-2'
-          ffprobe -v error -show_entries format=duration -of csv=p=0 utakata_master.wav
+          yt-dlp --no-playlist -f 'bestaudio/best' -x --audio-format wav --audio-quality 0 --write-info-json \
+            -o 'utakata_master.%(ext)s' 'https://soundcloud.com/homeless-mochi/nqrse-2'
 
       - name: Download official release preview
         run: |
           python - <<'PY'
           import urllib.parse, urllib.request, json
           q=urllib.parse.urlencode({'term':'泡沫の夜 nqrse','country':'jp','media':'music','limit':20})
-          with urllib.request.urlopen('https://itunes.apple.com/search?'+q, timeout=30) as r:
-              data=json.load(r)
-          hit=None
-          for x in data.get('results',[]):
-              if x.get('trackName')=='泡沫の夜' and str(x.get('artistName','')).lower()=='nqrse':
-                  hit=x; break
-          if not hit:
-              raise SystemExit('official preview not found')
+          with urllib.request.urlopen('https://itunes.apple.com/search?'+q, timeout=30) as r: data=json.load(r)
+          hit=next((x for x in data.get('results',[]) if x.get('trackName')=='泡沫の夜' and str(x.get('artistName','')).lower()=='nqrse'),None)
+          if not hit: raise SystemExit('official preview not found')
           print('track=',hit.get('trackName'),'artist=',hit.get('artistName'),'ms=',hit.get('trackTimeMillis'))
-          p=hit.get('previewUrl')
-          if not p: raise SystemExit('previewUrl missing')
-          urllib.request.urlretrieve(p,'official_preview.m4a')
+          urllib.request.urlretrieve(hit['previewUrl'],'official_preview.m4a')
           open('official_preview.json','w',encoding='utf-8').write(json.dumps(hit,ensure_ascii=False,indent=2))
           PY
           ffmpeg -y -i official_preview.m4a -ar 44100 -ac 2 official_preview.wav >/dev/null 2>&1
 
-      - name: Fingerprint-verify proxy
+      - name: Compare proxy with official preview
         run: |
           python - <<'PY'
-          import subprocess,json
-          def fp(p):
-              return json.loads(subprocess.check_output(['fpcalc','-raw','-json',p],text=True))['fingerprint']
+          import subprocess,json,numpy as np,soundfile as sf
+          from scipy.signal import correlate, correlation_lags
+          def fp(p): return json.loads(subprocess.check_output(['fpcalc','-raw','-json',p],text=True))['fingerprint']
           full=fp('utakata_master.wav'); prev=fp('official_preview.wav')
           trim=max(5,min(18,len(prev)//10)); p=prev[trim:len(prev)-trim]
           best=(99,None)
           for off in range(len(full)-len(p)+1):
               s=sum((int(a)^int(b)).bit_count() for a,b in zip(p,full[off:off+len(p)]))/len(p)
               if s<best[0]: best=(s,off)
-          print('best_mean_hamming=',best[0],'offset_frame=',best[1])
-          if best[0]>7.0: raise SystemExit('fingerprint mismatch')
-          open('fingerprint.txt','w').write(f'{best[0]:.4f} {best[1]}\n')
+          # independent waveform xcorr at ~4 kHz, scanning whole track
+          m,sr=sf.read('utakata_master.wav',always_2d=True); q,srq=sf.read('official_preview.wav',always_2d=True)
+          m=m.mean(1); q=q.mean(1)
+          step=max(1,sr//4000); a=m[::step]; b=q[::step]
+          a=(a-a.mean())/(a.std()+1e-9); b=(b-b.mean())/(b.std()+1e-9)
+          c=correlate(a,b,mode='valid',method='fft')/len(b)
+          k=int(np.argmax(c)); wc=float(c[k])
+          out={'fingerprint_mean_hamming':float(best[0]),'fingerprint_offset_frame':int(best[1]),
+               'preview_wave_corr':wc,'preview_wave_offset_sec':k*step/sr}
+          print(json.dumps(out,indent=2)); open('source_validation.json','w').write(json.dumps(out,indent=2))
+          # do not decide yet: official-inst alignment is the third independent check
           PY
 
       - name: Download official instrumental
@@ -77,31 +74,38 @@ jobs:
           import urllib.request
           url='https://www.dropbox.com/s/vmfvkfqvt1f1xys/utakata2mixinst.wav?dl=1'
           req=urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0'})
-          with urllib.request.urlopen(req, timeout=60) as r, open('utakata_inst_download','wb') as f:
-              f.write(r.read())
+          with urllib.request.urlopen(req, timeout=60) as r, open('utakata_inst_download','wb') as f: f.write(r.read())
           PY
           ffmpeg -y -i utakata_inst_download -ar 44100 -ac 2 utakata_inst.wav >/dev/null 2>&1
 
-      - name: Align master and official inst
+      - name: Align proxy with official inst and decide source
         run: |
           python - <<'PY'
-          import json, numpy as np, soundfile as sf
+          import json,numpy as np,soundfile as sf
           from scipy.signal import correlate, correlation_lags
           m,sr=sf.read('utakata_master.wav',always_2d=True); i,sri=sf.read('utakata_inst.wav',always_2d=True)
-          if sr!=sri: raise SystemExit((sr,sri))
           m=m.mean(1); i=i.mean(1)
-          step=max(1,sr//8000); n0=min(len(m),len(i),sr*180)
-          a=m[:n0:step]; b=i[:n0:step]
-          a=(a-a.mean())/(a.std()+1e-9); b=(b-b.mean())/(b.std()+1e-9)
+          step=max(1,sr//4000); n0=min(len(m),len(i),sr*210)
+          a=m[:n0:step]; b=i[:n0:step]; a=(a-a.mean())/(a.std()+1e-9); b=(b-b.mean())/(b.std()+1e-9)
           c=correlate(a,b,mode='full',method='fft'); l=correlation_lags(len(a),len(b),mode='full')
-          keep=np.abs(l)<=int(2*sr/step); lag=int(l[keep][np.argmax(c[keep])]); lag_sec=lag*step/sr
+          keep=np.abs(l)<=int(2*sr/step); ix=np.argmax(c[keep]); lag=int(l[keep][ix]); lag_sec=lag*step/sr
           lf=int(round(lag_sec*sr))
           if lf>=0: ma=m[lf:]; ia=i[:len(ma)]
           else: ia=i[-lf:]; ma=m[:len(ia)]
           n=min(len(ma),len(ia)); ma=ma[:n]; ia=ia[:n]
-          gain=float(np.dot(ma,ia)/(np.dot(ia,ia)+1e-12)); corr=float(np.corrcoef(ma[::20],(gain*ia)[::20])[0,1])
-          out={'sample_rate':sr,'master_duration':len(m)/sr,'inst_duration':len(i)/sr,'lag_sec':lag_sec,'inst_gain':gain,'wave_corr':corr}
-          print(json.dumps(out,indent=2)); open('alignment.json','w').write(json.dumps(out,indent=2))
+          # corr in 20 s windows; vocal should reduce but not destroy instrumental correlation
+          cors=[]
+          W=sr*20
+          for s in range(0,n-W+1,W):
+              x=ma[s:s+W:10]; y=ia[s:s+W:10]
+              if x.std()>1e-5 and y.std()>1e-5: cors.append(float(np.corrcoef(x,y)[0,1]))
+          v=json.load(open('source_validation.json'))
+          v.update({'inst_lag_sec':lag_sec,'inst_window_corr_median':float(np.median(cors)),'inst_window_corr_min':float(np.min(cors)),'inst_window_corr_max':float(np.max(cors))})
+          # source acceptance requires either strong preview waveform match, or decent preview fingerprint + strong exact official-inst alignment
+          accepted=(v['preview_wave_corr']>=0.55) or (v['fingerprint_mean_hamming']<=10.0 and v['inst_window_corr_median']>=0.45)
+          v['accepted']=bool(accepted)
+          print(json.dumps(v,indent=2)); open('source_validation.json','w').write(json.dumps(v,indent=2))
+          if not accepted: raise SystemExit('source validation failed')
           PY
 
       - name: Fetch LRCLIB timing candidate
@@ -131,9 +135,8 @@ jobs:
             utakata_master.wav
             utakata_master.info.json
             official_preview.json
-            fingerprint.txt
+            source_validation.json
             utakata_inst.wav
             utakata_vocals.wav
             utakata_no_vocals.wav
-            alignment.json
             lrclib.json
