@@ -9,7 +9,7 @@ on:
 jobs:
   fetch-audio:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,14 +21,21 @@ jobs:
 
       - name: Install dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
           python -m pip install --upgrade pip
-          python -m pip install -U yt-dlp
+          python -m pip install -U 'yt-dlp[default]'
+          node --version
           ffmpeg -version | head -n 1
+          yt-dlp --version
 
       - name: Download official audio
         run: |
           yt-dlp \
+            --verbose \
             --no-playlist \
+            --js-runtimes node \
+            --extractor-args 'youtube:player_client=web_embedded,android_vr,default' \
             -f 'bestaudio/best' \
             -x --audio-format wav --audio-quality 0 \
             --write-info-json \
