@@ -8,8 +8,8 @@ on:
 
 jobs:
   fetch-audio:
-    runs-on: macos-14
-    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,22 +22,18 @@ jobs:
       - name: Install yt-dlp
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -U 'yt-dlp[default]' curl-cffi
-          node --version
+          python -m pip install -U 'yt-dlp[default]'
           yt-dlp --version
 
-      - name: Download official bestaudio
+      - name: Download official Bilibili bestaudio
         run: |
           yt-dlp \
             --verbose \
             --no-playlist \
-            --js-runtimes node \
-            --impersonate chrome \
-            --extractor-args 'youtube:player_client=tv,web_embedded,android_vr,default' \
             -f 'bestaudio/best' \
             --write-info-json \
             -o 'propose_original.%(ext)s' \
-            'https://www.youtube.com/watch?v=VDdLF1YubI0'
+            'https://www.bilibili.com/video/BV1tnTNzfEYg/'
           ls -lh propose_original.*
 
       - name: Upload analysis artifact
