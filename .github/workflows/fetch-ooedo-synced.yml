@@ -1,0 +1,57 @@
+name: Fetch Ooedo Synced Timing
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-ooedo-synced.yml'
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch synced karaoke candidates
+        run: |
+          python - <<'PY'
+          import json, urllib.parse, urllib.request
+          base='https://api.synclrc.dev/lyrics'
+          params=[('track','OedoRanvu'),('artist','Reol'),('artist','nqrse'),('album','No title-'),('duration','181'),('type','karaoke'),('include','agents,background')]
+          url=base+'?'+urllib.parse.urlencode(params)
+          print('request=',url)
+          req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'})
+          try:
+              with urllib.request.urlopen(req,timeout=30) as r:
+                  data=json.load(r)
+          except Exception as e:
+              print('primary failed',repr(e))
+              params=[('track','オオエドランヴ'),('artist','REOL'),('duration','181'),('type','karaoke'),('include','agents,background')]
+              url=base+'?'+urllib.parse.urlencode(params)
+              print('fallback=',url)
+              req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'})
+              with urllib.request.urlopen(req,timeout=30) as r:
+                  data=json.load(r)
+          with open('ooedo_synced_raw.json','w',encoding='utf-8') as f:
+              json.dump(data,f,ensure_ascii=False,indent=2)
+          print('id=',data.get('id'))
+          print('track=',data.get('track'))
+          print('artist=',data.get('artist'))
+          print('duration=',data.get('duration'))
+          k=data.get('karaoke') or data.get('lyrics') or ''
+          s=data.get('synced') or ''
+          print('karaoke_chars=',len(k))
+          print('synced_chars=',len(s))
+          print('has_agents=', '{agent:' in k)
+          print('timed_lines=',sum(1 for x in k.splitlines() if x.startswith('[')))
+          if not k and not s:
+              raise SystemExit('No synced/karaoke lyrics found')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ooedo-synced-timing
+          path: ooedo_synced_raw.json
+          retention-days: 1
