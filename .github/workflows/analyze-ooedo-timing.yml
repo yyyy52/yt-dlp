@@ -28,15 +28,18 @@ jobs:
             -o 'ooedo.%(ext)s' 'https://rutube.ru/video/d9ae4c17bf1deeae0e935008c095fda6/'
           python -m demucs -n htdemucs --two-stems=vocals -o demucs_out ooedo.wav
           cp demucs_out/htdemucs/ooedo/vocals.wav vocals.wav
+          ffmpeg -y -i vocals.wav -ac 1 -ar 16000 -f f32le vocals.f32 >/dev/null 2>&1
       - name: Transcribe vocals with word timestamps
         run: |
           python - <<'PY'
           import json
+          import numpy as np
           from faster_whisper import WhisperModel
 
+          audio=np.fromfile('vocals.f32', dtype=np.float32)
           model = WhisperModel('large-v3-turbo', device='cpu', compute_type='int8', cpu_threads=4)
           segs, info = model.transcribe(
-              'vocals.wav',
+              audio,
               language='ja',
               task='transcribe',
               beam_size=5,
