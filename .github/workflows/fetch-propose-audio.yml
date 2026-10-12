@@ -24,7 +24,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
           python -m pip install --upgrade pip
-          python -m pip install -U 'yt-dlp[default]' demucs
+          python -m pip install -U numpy 'yt-dlp[default]'
+          python -m pip install -U torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -U demucs
           yt-dlp --version
           ffmpeg -version | head -n 1
 
