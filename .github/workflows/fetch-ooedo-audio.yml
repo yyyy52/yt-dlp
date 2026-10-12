@@ -29,7 +29,7 @@ jobs:
           python -m pip install -U demucs
           yt-dlp --version
 
-      - name: Download classic original from Niconico
+      - name: Download classic full recording from Niconico
         run: |
           yt-dlp \
             --no-playlist \
@@ -37,8 +37,22 @@ jobs:
             -x --audio-format wav --audio-quality 0 \
             --write-info-json \
             -o 'ooedo_original.%(ext)s' \
-            'https://www.nicovideo.jp/watch/sm24186563'
+            'https://www.nicovideo.jp/watch/sm45339370'
           ls -lh ooedo_original.*
+          DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 ooedo_original.wav)
+          echo "duration=$DURATION"
+          python - <<'PY'
+          import json, subprocess, sys
+          with open('ooedo_original.info.json', encoding='utf-8') as f:
+              d = json.load(f)
+          dur = float(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','csv=p=0','ooedo_original.wav'], text=True).strip())
+          print('id=', d.get('id'))
+          print('title=', d.get('title'))
+          print('uploader=', d.get('uploader'))
+          print('duration=', dur)
+          if not (175 <= dur <= 187):
+              sys.exit(f'Unexpected duration {dur}; expected classic full track around 3:01')
+          PY
 
       - name: Separate vocals
         run: |
