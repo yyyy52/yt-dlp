@@ -1,0 +1,121 @@
+name: Fetch Utakata Analysis
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-utakata-analysis.yml'
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install -U 'yt-dlp[default]' numpy scipy librosa soundfile
+          python -m pip install -U torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -U demucs
+
+      - name: Download official master
+        run: |
+          yt-dlp --no-playlist -f 'bestaudio/best' -x --audio-format wav --audio-quality 0 \
+            --write-info-json -o 'utakata_master.%(ext)s' \
+            'https://www.youtube.com/watch?v=0nnVWl4qbWM'
+          ffprobe -v error -show_entries format=duration -of csv=p=0 utakata_master.wav
+
+      - name: Download official instrumental
+        run: |
+          python - <<'PY'
+          import urllib.request
+          url='https://www.dropbox.com/s/vmfvkfqvt1f1xys/utakata2mixinst.wav?dl=1'
+          req=urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0'})
+          with urllib.request.urlopen(req, timeout=60) as r, open('utakata_inst_download','wb') as f:
+              f.write(r.read())
+          PY
+          file utakata_inst_download
+          ffmpeg -y -i utakata_inst_download -ar 44100 -ac 2 utakata_inst.wav >/dev/null 2>&1
+          ffprobe -v error -show_entries format=duration -of csv=p=0 utakata_inst.wav
+
+      - name: Align master and official inst
+        run: |
+          python - <<'PY'
+          import json, numpy as np, soundfile as sf
+          from scipy.signal import correlate, correlation_lags
+
+          m,sr=sf.read('utakata_master.wav', always_2d=True)
+          i,sri=sf.read('utakata_inst.wav', always_2d=True)
+          if sr!=sri: raise SystemExit((sr,sri))
+          m=m.mean(1); i=i.mean(1)
+          # use 8 kHz proxy and first 180 sec for robust global offset
+          step=max(1,sr//8000)
+          mm=m[:min(len(m),sr*180):step]
+          ii=i[:min(len(i),sr*180):step]
+          mm=(mm-mm.mean())/(mm.std()+1e-9)
+          ii=(ii-ii.mean())/(ii.std()+1e-9)
+          maxlag=int(2.0*sr/step)
+          # correlate a central window of master against inst
+          n=min(len(mm),len(ii))
+          a=mm[:n]
+          b=ii[:n]
+          c=correlate(a,b,mode='full',method='fft')
+          l=correlation_lags(len(a),len(b),mode='full')
+          keep=np.abs(l)<=maxlag
+          lag=int(l[keep][np.argmax(c[keep])])
+          lag_sec=lag*step/sr
+          # estimate linear gain after shift on overlapping full-rate region
+          lag_full=int(round(lag_sec*sr))
+          if lag_full>=0:
+              ma=m[lag_full:]; ia=i[:len(ma)]
+          else:
+              ia=i[-lag_full:]; ma=m[:len(ia)]
+          n=min(len(ma),len(ia)); ma=ma[:n]; ia=ia[:n]
+          gain=float(np.dot(ma,ia)/(np.dot(ia,ia)+1e-12))
+          corr=float(np.corrcoef(ma[::20],(gain*ia)[::20])[0,1])
+          out={'sample_rate':sr,'master_duration':len(m)/sr,'inst_duration':len(i)/sr,
+               'master_vs_inst_lag_sec':lag_sec,'inst_gain_to_master':gain,'wave_corr':corr}
+          print(json.dumps(out,indent=2))
+          open('alignment.json','w').write(json.dumps(out,indent=2))
+          PY
+
+      - name: Fetch LRCLIB timing candidate
+        run: |
+          python - <<'PY'
+          import urllib.parse, urllib.request, json
+          q=urllib.parse.urlencode({'track_name':'泡沫の夜','artist_name':'nqrse'})
+          req=urllib.request.Request('https://lrclib.net/api/search?'+q,headers={'User-Agent':'ChatGPT-analysis/1.0'})
+          with urllib.request.urlopen(req,timeout=30) as r: data=json.load(r)
+          for x in data:
+              print(x.get('trackName'),x.get('artistName'),x.get('duration'),bool(x.get('syncedLyrics')))
+          open('lrclib.json','w',encoding='utf-8').write(json.dumps(data,ensure_ascii=False,indent=2))
+          PY
+
+      - name: Separate vocals
+        run: |
+          python -m demucs -n htdemucs --two-stems=vocals -o demucs_out utakata_master.wav
+          cp demucs_out/htdemucs/utakata_master/vocals.wav utakata_vocals.wav
+          cp demucs_out/htdemucs/utakata_master/no_vocals.wav utakata_no_vocals.wav
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: utakata-analysis
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            utakata_master.wav
+            utakata_master.info.json
+            utakata_inst.wav
+            utakata_vocals.wav
+            utakata_no_vocals.wav
+            alignment.json
+            lrclib.json
