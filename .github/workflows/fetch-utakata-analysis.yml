@@ -20,18 +20,56 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg libchromaprint-tools
           python -m pip install --upgrade pip
           python -m pip install -U 'yt-dlp[default]' numpy scipy librosa soundfile
           python -m pip install -U torch torchaudio --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -U demucs
 
-      - name: Download official master
+      - name: Download full-length proxy
         run: |
           yt-dlp --no-playlist -f 'bestaudio/best' -x --audio-format wav --audio-quality 0 \
             --write-info-json -o 'utakata_master.%(ext)s' \
-            'https://www.youtube.com/watch?v=0nnVWl4qbWM'
+            'https://soundcloud.com/homeless-mochi/nqrse-2'
           ffprobe -v error -show_entries format=duration -of csv=p=0 utakata_master.wav
+
+      - name: Download official release preview
+        run: |
+          python - <<'PY'
+          import urllib.parse, urllib.request, json
+          q=urllib.parse.urlencode({'term':'泡沫の夜 nqrse','country':'jp','media':'music','limit':20})
+          with urllib.request.urlopen('https://itunes.apple.com/search?'+q, timeout=30) as r:
+              data=json.load(r)
+          hit=None
+          for x in data.get('results',[]):
+              if x.get('trackName')=='泡沫の夜' and str(x.get('artistName','')).lower()=='nqrse':
+                  hit=x; break
+          if not hit:
+              raise SystemExit('official preview not found')
+          print('track=',hit.get('trackName'),'artist=',hit.get('artistName'),'ms=',hit.get('trackTimeMillis'))
+          p=hit.get('previewUrl')
+          if not p: raise SystemExit('previewUrl missing')
+          urllib.request.urlretrieve(p,'official_preview.m4a')
+          open('official_preview.json','w',encoding='utf-8').write(json.dumps(hit,ensure_ascii=False,indent=2))
+          PY
+          ffmpeg -y -i official_preview.m4a -ar 44100 -ac 2 official_preview.wav >/dev/null 2>&1
+
+      - name: Fingerprint-verify proxy
+        run: |
+          python - <<'PY'
+          import subprocess,json
+          def fp(p):
+              return json.loads(subprocess.check_output(['fpcalc','-raw','-json',p],text=True))['fingerprint']
+          full=fp('utakata_master.wav'); prev=fp('official_preview.wav')
+          trim=max(5,min(18,len(prev)//10)); p=prev[trim:len(prev)-trim]
+          best=(99,None)
+          for off in range(len(full)-len(p)+1):
+              s=sum((int(a)^int(b)).bit_count() for a,b in zip(p,full[off:off+len(p)]))/len(p)
+              if s<best[0]: best=(s,off)
+          print('best_mean_hamming=',best[0],'offset_frame=',best[1])
+          if best[0]>7.0: raise SystemExit('fingerprint mismatch')
+          open('fingerprint.txt','w').write(f'{best[0]:.4f} {best[1]}\n')
+          PY
 
       - name: Download official instrumental
         run: |
@@ -42,49 +80,28 @@ jobs:
           with urllib.request.urlopen(req, timeout=60) as r, open('utakata_inst_download','wb') as f:
               f.write(r.read())
           PY
-          file utakata_inst_download
           ffmpeg -y -i utakata_inst_download -ar 44100 -ac 2 utakata_inst.wav >/dev/null 2>&1
-          ffprobe -v error -show_entries format=duration -of csv=p=0 utakata_inst.wav
 
       - name: Align master and official inst
         run: |
           python - <<'PY'
           import json, numpy as np, soundfile as sf
           from scipy.signal import correlate, correlation_lags
-
-          m,sr=sf.read('utakata_master.wav', always_2d=True)
-          i,sri=sf.read('utakata_inst.wav', always_2d=True)
+          m,sr=sf.read('utakata_master.wav',always_2d=True); i,sri=sf.read('utakata_inst.wav',always_2d=True)
           if sr!=sri: raise SystemExit((sr,sri))
           m=m.mean(1); i=i.mean(1)
-          # use 8 kHz proxy and first 180 sec for robust global offset
-          step=max(1,sr//8000)
-          mm=m[:min(len(m),sr*180):step]
-          ii=i[:min(len(i),sr*180):step]
-          mm=(mm-mm.mean())/(mm.std()+1e-9)
-          ii=(ii-ii.mean())/(ii.std()+1e-9)
-          maxlag=int(2.0*sr/step)
-          # correlate a central window of master against inst
-          n=min(len(mm),len(ii))
-          a=mm[:n]
-          b=ii[:n]
-          c=correlate(a,b,mode='full',method='fft')
-          l=correlation_lags(len(a),len(b),mode='full')
-          keep=np.abs(l)<=maxlag
-          lag=int(l[keep][np.argmax(c[keep])])
-          lag_sec=lag*step/sr
-          # estimate linear gain after shift on overlapping full-rate region
-          lag_full=int(round(lag_sec*sr))
-          if lag_full>=0:
-              ma=m[lag_full:]; ia=i[:len(ma)]
-          else:
-              ia=i[-lag_full:]; ma=m[:len(ia)]
+          step=max(1,sr//8000); n0=min(len(m),len(i),sr*180)
+          a=m[:n0:step]; b=i[:n0:step]
+          a=(a-a.mean())/(a.std()+1e-9); b=(b-b.mean())/(b.std()+1e-9)
+          c=correlate(a,b,mode='full',method='fft'); l=correlation_lags(len(a),len(b),mode='full')
+          keep=np.abs(l)<=int(2*sr/step); lag=int(l[keep][np.argmax(c[keep])]); lag_sec=lag*step/sr
+          lf=int(round(lag_sec*sr))
+          if lf>=0: ma=m[lf:]; ia=i[:len(ma)]
+          else: ia=i[-lf:]; ma=m[:len(ia)]
           n=min(len(ma),len(ia)); ma=ma[:n]; ia=ia[:n]
-          gain=float(np.dot(ma,ia)/(np.dot(ia,ia)+1e-12))
-          corr=float(np.corrcoef(ma[::20],(gain*ia)[::20])[0,1])
-          out={'sample_rate':sr,'master_duration':len(m)/sr,'inst_duration':len(i)/sr,
-               'master_vs_inst_lag_sec':lag_sec,'inst_gain_to_master':gain,'wave_corr':corr}
-          print(json.dumps(out,indent=2))
-          open('alignment.json','w').write(json.dumps(out,indent=2))
+          gain=float(np.dot(ma,ia)/(np.dot(ia,ia)+1e-12)); corr=float(np.corrcoef(ma[::20],(gain*ia)[::20])[0,1])
+          out={'sample_rate':sr,'master_duration':len(m)/sr,'inst_duration':len(i)/sr,'lag_sec':lag_sec,'inst_gain':gain,'wave_corr':corr}
+          print(json.dumps(out,indent=2)); open('alignment.json','w').write(json.dumps(out,indent=2))
           PY
 
       - name: Fetch LRCLIB timing candidate
@@ -94,8 +111,7 @@ jobs:
           q=urllib.parse.urlencode({'track_name':'泡沫の夜','artist_name':'nqrse'})
           req=urllib.request.Request('https://lrclib.net/api/search?'+q,headers={'User-Agent':'ChatGPT-analysis/1.0'})
           with urllib.request.urlopen(req,timeout=30) as r: data=json.load(r)
-          for x in data:
-              print(x.get('trackName'),x.get('artistName'),x.get('duration'),bool(x.get('syncedLyrics')))
+          for x in data: print(x.get('trackName'),x.get('artistName'),x.get('duration'),bool(x.get('syncedLyrics')))
           open('lrclib.json','w',encoding='utf-8').write(json.dumps(data,ensure_ascii=False,indent=2))
           PY
 
@@ -114,6 +130,8 @@ jobs:
           path: |
             utakata_master.wav
             utakata_master.info.json
+            official_preview.json
+            fingerprint.txt
             utakata_inst.wav
             utakata_vocals.wav
             utakata_no_vocals.wav
