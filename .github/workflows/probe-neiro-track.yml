@@ -1,0 +1,49 @@
+name: Probe Neiro Track Page
+
+on:
+  push:
+    paths:
+      - '.github/workflows/probe-neiro-track.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Probe track page and APIs
+        run: |
+          python - <<'PY'
+          import urllib.request,re,html,json
+          base='https://hitparad.fm/track/4230533'
+          req=urllib.request.Request(base,headers={'User-Agent':'Mozilla/5.0','Referer':'https://hitparad.fm/tracks/kreva'})
+          txt=urllib.request.urlopen(req,timeout=30).read().decode('utf-8','ignore')
+          print('len',len(txt))
+          for needle in ['audio','mp3','4230533','download','play','source','file','url']:
+              print('\n===',needle,'===')
+              for m in list(re.finditer(needle,txt,re.I))[:20]:
+                  print(txt[max(0,m.start()-800):m.start()+1800])
+          print('\n--- attrs/media ---')
+          seen=set()
+          for m in re.findall(r'''(?:href|src|data-src|data-url|data-file|data-audio|data-track|content)=[\"']([^\"']+)[\"']''',txt,re.I):
+              s=html.unescape(m)
+              if s not in seen and any(x in s.lower() for x in ['mp3','audio','track','download','api','m3u','cdn','media']):
+                  seen.add(s); print(s)
+          print('\n--- URLs around JSON/scripts ---')
+          for pat in [r'https?://[^\"\'<> ]+',r'/api/[^\"\'<> ]+',r'[^\"\'<> ]+\.mp3(?:\?[^\"\'<> ]*)?']:
+              vals=[]
+              for m in re.findall(pat,txt,re.I):
+                  s=html.unescape(m)
+                  if s not in vals: vals.append(s)
+              print('PAT',pat,'COUNT',len(vals))
+              for s in vals[:200]: print(s)
+          open('track_page.html','w',encoding='utf-8').write(txt)
+          PY
+      - name: Upload probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: neiro-track-probe
+          retention-days: 1
+          path: track_page.html
