@@ -16,18 +16,32 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      # Stage 1: acquisition. Keep this deliberately lightweight so a blocked
+      # source fails in seconds instead of after installing audio/ML tooling.
+      - name: Install acquisition dependency
         run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg libchromaprint-tools
           python -m pip install --upgrade pip
-          python -m pip install -U 'yt-dlp[default]' numpy scipy librosa soundfile
-          python -m pip install -U torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install -U demucs
+          python -m pip install -U 'yt-dlp[default]'
 
-      - name: Download 2004 full-length proxy
+      - name: Acquire 2004 full-length candidate
         run: |
-          yt-dlp --no-playlist -f 'bestaudio/best' -x --audio-format wav --audio-quality 0 --write-info-json \
-            -o 'neiro_master.%(ext)s' 'https://www.bilibili.com/video/BV1bh411L7ak'
+          yt-dlp --no-playlist -f 'bestaudio/best' --write-info-json \
+            -o 'neiro_source.%(ext)s' 'https://www.bilibili.com/video/BV1bh411L7ak'
+          test -n "$(find . -maxdepth 1 -type f -name 'neiro_source.*' ! -name '*.json' -print -quit)"
+
+      # Stage 2: validation. Install only the signal-processing tools needed to
+      # prove that the candidate matches the official 2004 release.
+      - name: Install validation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libchromaprint-tools
+          python -m pip install -U numpy scipy soundfile
+
+      - name: Normalize candidate audio
+        run: |
+          SRC="$(find . -maxdepth 1 -type f -name 'neiro_source.*' ! -name '*.json' -print -quit)"
+          test -n "$SRC"
+          ffmpeg -y -i "$SRC" -ar 44100 -ac 2 neiro_master.wav >/dev/null 2>&1
 
       - name: Download official Apple preview
         run: |
@@ -46,7 +60,7 @@ jobs:
           PY
           ffmpeg -y -i official_preview.m4a -ar 44100 -ac 2 official_preview.wav >/dev/null 2>&1
 
-      - name: Validate proxy against official preview
+      - name: Validate candidate against official preview
         run: |
           python - <<'PY'
           import subprocess,json,numpy as np,soundfile as sf
@@ -74,6 +88,13 @@ jobs:
           if not accepted: raise SystemExit('source validation failed')
           PY
 
+      # Stage 3 prerequisites: only pay the heavy ML setup cost after source
+      # validation has passed.
+      - name: Install separation dependencies
+        run: |
+          python -m pip install -U torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -U demucs librosa
+
       - name: Fetch LRCLIB timing candidate
         run: |
           python - <<'PY'
@@ -91,7 +112,7 @@ jobs:
           cp demucs_out/htdemucs/neiro_master/vocals.wav neiro_vocals.wav
           cp demucs_out/htdemucs/neiro_master/no_vocals.wav neiro_no_vocals.wav
 
-      - name: Upload artifact
+      - name: Upload validated analysis artifact
         uses: actions/upload-artifact@v4
         with:
           name: neiro-analysis
@@ -99,7 +120,7 @@ jobs:
           if-no-files-found: error
           path: |
             neiro_master.wav
-            neiro_master.info.json
+            neiro_source.info.json
             official_preview.json
             source_validation.json
             neiro_vocals.wav
