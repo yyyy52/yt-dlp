@@ -1,0 +1,46 @@
+name: Extract Neiro Play URL
+
+on:
+  push:
+    paths:
+      - '.github/workflows/extract-neiro-play-url.yml'
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Extract RSC track object
+        run: |
+          python - <<'PY'
+          import urllib.request,re,html,json
+          u='https://hitparad.fm/track/4230533'
+          req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0','Referer':'https://hitparad.fm/tracks/kreva'})
+          txt=urllib.request.urlopen(req,timeout=30).read().decode('utf-8','ignore')
+          print('len',len(txt))
+          # Raw contexts around track id / title / fileId / play
+          for needle in ['4230533','Neiro ~','音色','fileId','\\"play\\"','"play"']:
+            print('\n###',needle)
+            hits=list(re.finditer(re.escape(needle),txt,re.I))
+            print('count',len(hits))
+            for m in hits[:30]: print(txt[max(0,m.start()-1500):m.start()+3000])
+          # Decode HTML entities + JS escaped strings to expose JSON-like data
+          dec=html.unescape(txt)
+          dec=dec.replace('\\u0026','&').replace('\\u003c','<').replace('\\u003e','>').replace('\\"','"')
+          print('\n### decoded contexts')
+          for needle in ['4230533','fileId','"play"']:
+            hits=list(re.finditer(re.escape(needle),dec,re.I))
+            print('NEEDLE',needle,'COUNT',len(hits))
+            for m in hits[:50]:
+              frag=dec[max(0,m.start()-1200):m.start()+2500]
+              if '4230533' in frag or needle=='4230533': print(frag)
+          # Extract any URL near 4230533 that looks audio-ish
+          for m in re.finditer('4230533',dec):
+            frag=dec[max(0,m.start()-5000):m.start()+5000]
+            urls=re.findall(r'https?://[^\s"<>\\]+',frag)
+            for x in urls:
+              if any(k in x.lower() for k in ['mp3','cdn','media','audio','file','storage']): print('CANDIDATE_URL',x)
+          PY
