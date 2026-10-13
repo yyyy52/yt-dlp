@@ -55,7 +55,6 @@ jobs:
           for off in range(len(full)-len(p)+1):
               s=sum((int(a)^int(b)).bit_count() for a,b in zip(p,full[off:off+len(p)]))/len(p)
               if s<best[0]: best=(s,off)
-          # independent waveform xcorr at ~4 kHz, scanning whole track
           m,sr=sf.read('utakata_master.wav',always_2d=True); q,srq=sf.read('official_preview.wav',always_2d=True)
           m=m.mean(1); q=q.mean(1)
           step=max(1,sr//4000); a=m[::step]; b=q[::step]
@@ -65,7 +64,6 @@ jobs:
           out={'fingerprint_mean_hamming':float(best[0]),'fingerprint_offset_frame':int(best[1]),
                'preview_wave_corr':wc,'preview_wave_offset_sec':k*step/sr}
           print(json.dumps(out,indent=2)); open('source_validation.json','w').write(json.dumps(out,indent=2))
-          # do not decide yet: official-inst alignment is the third independent check
           PY
 
       - name: Download official instrumental
@@ -93,7 +91,6 @@ jobs:
           if lf>=0: ma=m[lf:]; ia=i[:len(ma)]
           else: ia=i[-lf:]; ma=m[:len(ia)]
           n=min(len(ma),len(ia)); ma=ma[:n]; ia=ia[:n]
-          # corr in 20 s windows; vocal should reduce but not destroy instrumental correlation
           cors=[]
           W=sr*20
           for s in range(0,n-W+1,W):
@@ -101,7 +98,6 @@ jobs:
               if x.std()>1e-5 and y.std()>1e-5: cors.append(float(np.corrcoef(x,y)[0,1]))
           v=json.load(open('source_validation.json'))
           v.update({'inst_lag_sec':lag_sec,'inst_window_corr_median':float(np.median(cors)),'inst_window_corr_min':float(np.min(cors)),'inst_window_corr_max':float(np.max(cors))})
-          # source acceptance requires either strong preview waveform match, or decent preview fingerprint + strong exact official-inst alignment
           accepted=(v['preview_wave_corr']>=0.55) or (v['fingerprint_mean_hamming']<=10.0 and v['inst_window_corr_median']>=0.45)
           v['accepted']=bool(accepted)
           print(json.dumps(v,indent=2)); open('source_validation.json','w').write(json.dumps(v,indent=2))
@@ -140,3 +136,5 @@ jobs:
             utakata_vocals.wav
             utakata_no_vocals.wav
             lrclib.json
+
+# refresh: 2026-10-13T14:51+08:00
