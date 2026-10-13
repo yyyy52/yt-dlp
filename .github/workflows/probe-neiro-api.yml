@@ -1,0 +1,56 @@
+name: Probe Neiro Media API
+
+on:
+  push:
+    paths:
+      - '.github/workflows/probe-neiro-api.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Probe Next data and JS
+        run: |
+          python - <<'PY'
+          import urllib.request,re,html,json,urllib.parse
+          headers={'User-Agent':'Mozilla/5.0','Referer':'https://hitparad.fm/tracks/kreva'}
+          def get(u):
+              req=urllib.request.Request(u,headers=headers)
+              return urllib.request.urlopen(req,timeout=30).read().decode('utf-8','ignore')
+          u='https://hitparad.fm/track/4230533'
+          txt=get(u)
+          print('PAGE',len(txt))
+          # print Next data if present
+          m=re.search(r'<script[^>]+id=[\"\']__NEXT_DATA__[\"\'][^>]*>(.*?)</script>',txt,re.S|re.I)
+          if m:
+              print('NEXT_DATA',html.unescape(m.group(1))[:100000])
+          # print script srcs, download and search likely player/API strings
+          srcs=re.findall(r'<script[^>]+src=[\"\']([^\"\']+)[\"\']',txt,re.I)
+          print('SCRIPTS',len(srcs))
+          pats=['4230533','/api/','audio','mp3','stream','play','download','trackUrl','fileUrl','media']
+          for src in srcs:
+              su=urllib.parse.urljoin(u,html.unescape(src))
+              try: js=get(su)
+              except Exception as e:
+                  print('ERR',su,e); continue
+              hits=[]
+              low=js.lower()
+              if any(p.lower() in low for p in pats):
+                  print('\nJS',su,'LEN',len(js))
+                  for p in pats:
+                      for mm in list(re.finditer(re.escape(p),js,re.I))[:10]:
+                          frag=js[max(0,mm.start()-500):mm.start()+1200]
+                          if frag not in hits:
+                              hits.append(frag); print('HIT',p,frag)
+          # Try common Next data endpoint if build id available
+          bm=re.search(r'\"buildId\":\"([^\"]+)\"',txt)
+          if bm:
+              bid=bm.group(1); du=f'https://hitparad.fm/_next/data/{bid}/track/4230533.json'
+              try:
+                  d=get(du); print('NEXT_JSON',du,d[:100000])
+              except Exception as e: print('NEXT_JSON_ERR',du,e)
+          PY
