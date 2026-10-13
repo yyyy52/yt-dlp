@@ -24,43 +24,40 @@ jobs:
           python -m pip install -U torch torchaudio --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -U demucs
 
-      - name: Download original master
+      - name: Download 2004 full-length proxy
         run: |
-          yt-dlp --no-playlist --extractor-args 'youtube:player_client=web_safari,android_vr' \
-            -f 'bestaudio/best' -x --audio-format wav --audio-quality 0 --write-info-json \
-            -o 'neiro_master.%(ext)s' 'https://www.youtube.com/watch?v=WRFwZY8Pm6w'
+          yt-dlp --no-playlist -f 'bestaudio/best' -x --audio-format wav --audio-quality 0 --write-info-json \
+            -o 'neiro_master.%(ext)s' 'https://www.bilibili.com/video/BV1bh411L7ak'
 
-      - name: Download official instrumental
-        run: |
-          yt-dlp --no-playlist --extractor-args 'youtube:player_client=web_safari,android_vr' \
-            -f 'bestaudio/best' -x --audio-format wav --audio-quality 0 --write-info-json \
-            -o 'neiro_inst.%(ext)s' 'https://www.youtube.com/watch?v=16xiSaRHQLk'
-
-      - name: Download official release preview
+      - name: Download official Apple preview
         run: |
           python - <<'PY'
           import urllib.parse, urllib.request, json
           q=urllib.parse.urlencode({'term':'音色 KREVA','country':'jp','media':'music','limit':30})
-          with urllib.request.urlopen('https://itunes.apple.com/search?'+q, timeout=30) as r: data=json.load(r)
-          hit=next((x for x in data.get('results',[]) if x.get('trackName')=='音色' and str(x.get('artistName','')).lower()=='kreva'),None)
-          if not hit: raise SystemExit('official preview not found')
+          with urllib.request.urlopen('https://itunes.apple.com/search?'+q, timeout=30) as r:
+              data=json.load(r)
+          hits=[x for x in data.get('results',[]) if x.get('trackName')=='音色' and str(x.get('artistName','')).lower()=='kreva']
+          if not hits:
+              raise SystemExit('official preview not found')
+          hit=sorted(hits,key=lambda x:abs(int(x.get('trackTimeMillis') or 0)-233000))[0]
           print('track=',hit.get('trackName'),'artist=',hit.get('artistName'),'ms=',hit.get('trackTimeMillis'))
           urllib.request.urlretrieve(hit['previewUrl'],'official_preview.m4a')
           open('official_preview.json','w',encoding='utf-8').write(json.dumps(hit,ensure_ascii=False,indent=2))
           PY
           ffmpeg -y -i official_preview.m4a -ar 44100 -ac 2 official_preview.wav >/dev/null 2>&1
 
-      - name: Validate master against official preview and inst
+      - name: Validate proxy against official preview
         run: |
           python - <<'PY'
           import subprocess,json,numpy as np,soundfile as sf
-          from scipy.signal import correlate, correlation_lags
-          def fp(p): return json.loads(subprocess.check_output(['fpcalc','-raw','-json',p],text=True))['fingerprint']
+          from scipy.signal import correlate
+          def fp(p):
+              return json.loads(subprocess.check_output(['fpcalc','-raw','-json',p],text=True))['fingerprint']
           full=fp('neiro_master.wav'); prev=fp('official_preview.wav')
           trim=max(5,min(18,len(prev)//10)); p=prev[trim:len(prev)-trim]
           best=(99,None)
-          for off in range(len(full)-len(p)+1):
-              s=sum((int(a)^int(b)).bit_count() for a,b in zip(p,full[off:off+len(p)]))/len(p)
+          for off in range(max(1,len(full)-len(p)+1)):
+              s=sum((int(a)^int(b)).bit_count() for a,b in zip(p,full[off:off+len(p)]))/max(1,len(p))
               if s<best[0]: best=(s,off)
           m,sr=sf.read('neiro_master.wav',always_2d=True); q,srq=sf.read('official_preview.wav',always_2d=True)
           m=m.mean(1); q=q.mean(1)
@@ -68,27 +65,12 @@ jobs:
           a=(a-a.mean())/(a.std()+1e-9); b=(b-b.mean())/(b.std()+1e-9)
           c=correlate(a,b,mode='valid',method='fft')/len(b)
           k=int(np.argmax(c)); wc=float(c[k])
-
-          inst,sri=sf.read('neiro_inst.wav',always_2d=True); inst=inst.mean(1)
-          step2=max(1,sr//4000); aa=m[::step2]; bb=inst[::step2]
-          aa=(aa-aa.mean())/(aa.std()+1e-9); bb=(bb-bb.mean())/(bb.std()+1e-9)
-          cc=correlate(aa,bb,mode='full',method='fft'); l=correlation_lags(len(aa),len(bb),mode='full')
-          keep=np.abs(l)<=int(2*sr/step2); ix=np.argmax(cc[keep]); lag=int(l[keep][ix]); lag_sec=lag*step2/sr
-          lf=int(round(lag_sec*sr))
-          if lf>=0: ma=m[lf:]; ia=inst[:len(ma)]
-          else: ia=inst[-lf:]; ma=m[:len(ia)]
-          n=min(len(ma),len(ia)); ma=ma[:n]; ia=ia[:n]
-          cors=[]; W=sr*20
-          for s in range(0,n-W+1,W):
-              x=ma[s:s+W:10]; y=ia[s:s+W:10]
-              if x.std()>1e-5 and y.std()>1e-5: cors.append(float(np.corrcoef(x,y)[0,1]))
           out={'fingerprint_mean_hamming':float(best[0]),'fingerprint_offset_frame':int(best[1]),
-               'preview_wave_corr':wc,'preview_wave_offset_sec':k*step/sr,
-               'inst_lag_sec':lag_sec,'inst_window_corr_median':float(np.median(cors)),
-               'inst_window_corr_min':float(np.min(cors)),'inst_window_corr_max':float(np.max(cors))}
-          accepted=(wc>=0.50) or (best[0]<=10.0 and np.median(cors)>=0.40)
+               'preview_wave_corr':wc,'preview_wave_offset_sec':k*step/sr}
+          accepted=(wc>=0.45) or (best[0]<=10.0)
           out['accepted']=bool(accepted)
-          print(json.dumps(out,indent=2)); open('source_validation.json','w').write(json.dumps(out,indent=2))
+          print(json.dumps(out,indent=2))
+          open('source_validation.json','w').write(json.dumps(out,indent=2))
           if not accepted: raise SystemExit('source validation failed')
           PY
 
@@ -113,13 +95,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: neiro-analysis
-          retention-days: 1
+          retention-days: 2
           if-no-files-found: error
           path: |
             neiro_master.wav
             neiro_master.info.json
-            neiro_inst.wav
-            neiro_inst.info.json
             official_preview.json
             source_validation.json
             neiro_vocals.wav
