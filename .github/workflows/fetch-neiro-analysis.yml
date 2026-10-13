@@ -16,8 +16,8 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Stage 1: acquisition. Keep this deliberately lightweight so a blocked
-      # source fails in seconds instead of after installing audio/ML tooling.
+      # Stage 1: acquisition. No YouTube path: use a full-length Bilibili candidate
+      # and accept it only after matching the official Apple preview.
       - name: Install acquisition dependency
         run: |
           python -m pip install --upgrade pip
