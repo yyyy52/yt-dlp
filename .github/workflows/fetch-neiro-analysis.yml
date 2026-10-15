@@ -126,3 +126,5 @@ jobs:
             neiro_vocals.wav
             neiro_no_vocals.wav
             lrclib.json
+
+# retrigger 2026-10-15: no-YouTube pipeline
