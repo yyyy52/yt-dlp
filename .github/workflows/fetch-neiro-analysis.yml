@@ -6,44 +6,50 @@ on:
       - '.github/workflows/fetch-neiro-analysis.yml'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   analyze:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # Stage 1: acquisition. No YouTube path: use a full-length Bilibili candidate
-      # and accept it only after matching the official Apple preview.
       - name: Install acquisition dependency
         run: |
           python -m pip install --upgrade pip
           python -m pip install -U 'yt-dlp[default]'
 
-      - name: Acquire 2004 full-length candidate
+      - name: Acquire 2004 full-length candidate (no YouTube)
+        id: acquire
+        continue-on-error: true
         run: |
+          rm -f neiro_source.*
           yt-dlp --no-playlist -f 'bestaudio/best' --write-info-json \
             -o 'neiro_source.%(ext)s' 'https://www.bilibili.com/video/BV1bh411L7ak'
           test -n "$(find . -maxdepth 1 -type f -name 'neiro_source.*' ! -name '*.json' -print -quit)"
 
-      # Stage 2: validation. Install only the signal-processing tools needed to
-      # prove that the candidate matches the official 2004 release.
       - name: Install validation dependencies
+        if: steps.acquire.outcome == 'success'
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg libchromaprint-tools
-          python -m pip install -U numpy scipy soundfile
+          python -m pip install -U numpy scipy soundfile librosa
 
       - name: Normalize candidate audio
+        if: steps.acquire.outcome == 'success'
         run: |
           SRC="$(find . -maxdepth 1 -type f -name 'neiro_source.*' ! -name '*.json' -print -quit)"
-          test -n "$SRC"
           ffmpeg -y -i "$SRC" -ar 44100 -ac 2 neiro_master.wav >/dev/null 2>&1
 
       - name: Download official Apple preview
+        if: steps.acquire.outcome == 'success'
         run: |
           python - <<'PY'
           import urllib.parse, urllib.request, json
@@ -54,13 +60,16 @@ jobs:
           if not hits:
               raise SystemExit('official preview not found')
           hit=sorted(hits,key=lambda x:abs(int(x.get('trackTimeMillis') or 0)-233000))[0]
-          print('track=',hit.get('trackName'),'artist=',hit.get('artistName'),'ms=',hit.get('trackTimeMillis'))
           urllib.request.urlretrieve(hit['previewUrl'],'official_preview.m4a')
           open('official_preview.json','w',encoding='utf-8').write(json.dumps(hit,ensure_ascii=False,indent=2))
+          print('Apple:', hit.get('trackName'), hit.get('artistName'), hit.get('trackTimeMillis'))
           PY
           ffmpeg -y -i official_preview.m4a -ar 44100 -ac 2 official_preview.wav >/dev/null 2>&1
 
       - name: Validate candidate against official preview
+        id: validate
+        if: steps.acquire.outcome == 'success'
+        continue-on-error: true
         run: |
           python - <<'PY'
           import subprocess,json,numpy as np,soundfile as sf
@@ -80,39 +89,188 @@ jobs:
           c=correlate(a,b,mode='valid',method='fft')/len(b)
           k=int(np.argmax(c)); wc=float(c[k])
           out={'fingerprint_mean_hamming':float(best[0]),'fingerprint_offset_frame':int(best[1]),
-               'preview_wave_corr':wc,'preview_wave_offset_sec':k*step/sr}
+               'preview_wave_corr':wc,'preview_wave_offset_sec':k*step/sr,
+               'master_duration_sec':len(m)/sr,'preview_duration_sec':len(q)/sr}
           accepted=(wc>=0.45) or (best[0]<=10.0)
           out['accepted']=bool(accepted)
-          print(json.dumps(out,indent=2))
           open('source_validation.json','w').write(json.dumps(out,indent=2))
+          print(json.dumps(out,indent=2))
           if not accepted: raise SystemExit('source validation failed')
           PY
 
-      # Stage 3 prerequisites: only pay the heavy ML setup cost after source
-      # validation has passed.
       - name: Install separation dependencies
+        if: steps.acquire.outcome == 'success' && steps.validate.outcome == 'success'
         run: |
           python -m pip install -U torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install -U demucs librosa
+          python -m pip install -U demucs
 
       - name: Fetch LRCLIB timing candidate
+        if: steps.acquire.outcome == 'success' && steps.validate.outcome == 'success'
         run: |
           python - <<'PY'
           import urllib.parse, urllib.request, json
           q=urllib.parse.urlencode({'track_name':'音色','artist_name':'KREVA'})
           req=urllib.request.Request('https://lrclib.net/api/search?'+q,headers={'User-Agent':'ChatGPT-analysis/1.0'})
           with urllib.request.urlopen(req,timeout=30) as r: data=json.load(r)
-          for x in data: print(x.get('trackName'),x.get('artistName'),x.get('duration'),bool(x.get('syncedLyrics')))
           open('lrclib.json','w',encoding='utf-8').write(json.dumps(data,ensure_ascii=False,indent=2))
+          print([(x.get('trackName'),x.get('artistName'),x.get('duration'),bool(x.get('syncedLyrics'))) for x in data])
           PY
 
       - name: Separate vocals
+        id: separate
+        if: steps.acquire.outcome == 'success' && steps.validate.outcome == 'success'
+        continue-on-error: true
         run: |
           python -m demucs -n htdemucs --two-stems=vocals -o demucs_out neiro_master.wav
           cp demucs_out/htdemucs/neiro_master/vocals.wav neiro_vocals.wav
           cp demucs_out/htdemucs/neiro_master/no_vocals.wav neiro_no_vocals.wav
 
-      - name: Upload validated analysis artifact
+      - name: Blind Rap-oriented audio analysis
+        id: audio_analysis
+        if: steps.separate.outcome == 'success'
+        continue-on-error: true
+        run: |
+          mkdir -p analysis/neiro
+          python - <<'PY'
+          import json,re,math
+          import numpy as np
+          import librosa
+          from scipy.signal import find_peaks
+
+          SR=22050; HOP=256; NFFT=2048
+          v,_=librosa.load('neiro_vocals.wav',sr=SR,mono=True)
+          inst,_=librosa.load('neiro_no_vocals.wav',sr=SR,mono=True)
+          dur=len(v)/SR
+
+          # Beat grid from accompaniment only.
+          tempo,beats=librosa.beat.beat_track(y=inst,sr=SR,hop_length=HOP,units='frames')
+          tempo=float(np.asarray(tempo).reshape(-1)[0])
+          bt=librosa.frames_to_time(beats,sr=SR,hop_length=HOP)
+          q=float(np.median(np.diff(bt))) if len(bt)>2 else 60.0/tempo
+          sub=q/4.0
+          origin=float(bt[0]) if len(bt) else 0.0
+
+          # Vocal features only; lyrics are not used here.
+          rms=librosa.feature.rms(y=v,frame_length=NFFT,hop_length=HOP,center=True)[0]
+          rms_db=librosa.amplitude_to_db(rms+1e-12,ref=np.max)
+          onset=librosa.onset.onset_strength(y=v,sr=SR,hop_length=HOP)
+          S=np.abs(librosa.stft(v,n_fft=NFFT,hop_length=HOP))
+          freqs=librosa.fft_frequencies(sr=SR,n_fft=NFFT)
+          mid=(freqs>=150)&(freqs<2000); hi=(freqs>=2000)&(freqs<=5000)
+          em=(S[mid]**2).mean(axis=0)+1e-12; eh=(S[hi]**2).mean(axis=0)+1e-12
+          hir=10*np.log10(eh/em)
+          n=min(len(rms_db),len(onset),len(hir)); rms_db=rms_db[:n]; onset=onset[:n]; hir=hir[:n]
+          times=librosa.frames_to_time(np.arange(n),sr=SR,hop_length=HOP)
+          def rz(x):
+              med=np.median(x); mad=np.median(np.abs(x-med))+1e-9
+              return (x-med)/(1.4826*mad)
+          score=0.85*rz(rms_db)+1.00*rz(onset)+0.45*rz(hir)
+          pk,_=find_peaks(score,distance=max(1,int(0.075*SR/HOP)),prominence=1.35)
+          ranked=pk[np.argsort(score[pk])[::-1]]
+          prominent=[]
+          for i in ranked[:180]:
+              t=float(times[i]); k=round((t-origin)/sub); grid=origin+k*sub; delta=t-grid
+              prominent.append({'time':round(t,4),'score':round(float(score[i]),3),
+                                 'rms_db':round(float(rms_db[i]),2),'onset_z':round(float(rz(onset)[i]),2),
+                                 'highband_ratio_db':round(float(hir[i]),2),
+                                 'nearest_16th_delta_ms':round(delta*1000,1)})
+          prominent.sort(key=lambda x:x['time'])
+
+          # Blind reset candidates: deep local vocal energy valley + re-attack.
+          valleys,_=find_peaks(-rms_db,distance=max(1,int(0.055*SR/HOP)),prominence=4.0)
+          resets=[]
+          for i in valleys:
+              l=max(0,i-int(0.15*SR/HOP)); r=min(n,i+int(0.15*SR/HOP)+1)
+              pre=np.median(rms_db[l:i]) if i>l else rms_db[i]
+              post=np.median(rms_db[i+1:r]) if r>i+1 else rms_db[i]
+              depth=min(pre,post)-rms_db[i]
+              a=i+1; b=min(n,i+1+int(0.11*SR/HOP))
+              reattack=float(np.max(rz(onset)[a:b])) if b>a else -9
+              if depth>=7.0 and reattack>=0.8:
+                  resets.append({'time':round(float(times[i]),4),'depth_db':round(float(depth),2),
+                                 'reattack_onset_z':round(reattack,2)})
+
+          # F0 / voice-state summary in fixed 8-bar windows, independent of lyrics.
+          f0,voiced,_=librosa.pyin(v,fmin=librosa.note_to_hz('C2'),fmax=librosa.note_to_hz('C5'),sr=SR,hop_length=HOP)
+          win=max(8*q,8.0)
+          segments=[]
+          t0=0.0
+          while t0<dur:
+              t1=min(dur,t0+win); a=int(t0*SR/HOP); b=min(n,int(t1*SR/HOP))
+              ff=f0[a:min(b,len(f0))]
+              vf=ff[np.isfinite(ff)]
+              segments.append({'start':round(t0,3),'end':round(t1,3),
+                               'median_f0_hz':round(float(np.median(vf)),1) if len(vf) else None,
+                               'onset_density_per_s':round(float(np.sum(onset[a:b]>np.median(onset)+1.4826*np.median(np.abs(onset-np.median(onset))))/(t1-t0+1e-9)),2),
+                               'median_highband_ratio_db':round(float(np.median(hir[a:b])),2) if b>a else None})
+              t0=t1
+
+          # LRCLIB timing only: store line indices/times, never lyric text.
+          line_windows=[]
+          try:
+              rows=json.load(open('lrclib.json',encoding='utf-8'))
+              cand=next((x for x in rows if x.get('syncedLyrics')),None)
+              if cand:
+                  starts=[]
+                  for line in cand['syncedLyrics'].splitlines():
+                      m=re.match(r'\[(\d+):(\d+(?:\.\d+)?)\]',line)
+                      if m: starts.append(int(m.group(1))*60+float(m.group(2)))
+                  for j,s in enumerate(starts):
+                      e=starts[j+1] if j+1<len(starts) else dur
+                      p=[x for x in prominent if s<=x['time']<e]
+                      rr=[x for x in resets if s<=x['time']<e]
+                      line_windows.append({'line_index':j+1,'start':round(s,3),'end':round(e,3),
+                                           'top_prominence_times':[x['time'] for x in sorted(p,key=lambda z:z['score'],reverse=True)[:4]],
+                                           'reset_candidate_times':[x['time'] for x in rr]})
+          except Exception as ex:
+              print('LRCLIB timing parse warning:',ex)
+
+          report={'song':'音色','artist':'KREVA','analysis_policy':'audio-first; no lyrics used to create candidates',
+                  'duration_sec':round(dur,3),'tempo_bpm':round(tempo,4),'quarter_sec':round(q,6),
+                  'sixteenth_sec':round(sub,6),'beat_origin_sec':round(origin,4),
+                  'beat_count':int(len(bt)),'prominence_events':prominent,
+                  'raw_reset_candidates':resets,'voice_state_windows':segments,
+                  'lrclib_line_windows_without_text':line_windows}
+          open('analysis/neiro/neiro_audio_report.json','w',encoding='utf-8').write(json.dumps(report,ensure_ascii=False,indent=2))
+          print('duration',dur,'tempo',tempo,'prominence',len(prominent),'reset_candidates',len(resets),'lines',len(line_windows))
+          PY
+
+      - name: Write pipeline status
+        if: always()
+        env:
+          ACQUIRE: ${{ steps.acquire.outcome }}
+          VALIDATE: ${{ steps.validate.outcome }}
+          SEPARATE: ${{ steps.separate.outcome }}
+          AUDIO_ANALYSIS: ${{ steps.audio_analysis.outcome }}
+        run: |
+          mkdir -p analysis/neiro
+          python - <<'PY'
+          import json,os,pathlib
+          val=None
+          p=pathlib.Path('source_validation.json')
+          if p.exists():
+              try: val=json.loads(p.read_text())
+              except: pass
+          out={'acquire':os.getenv('ACQUIRE'),'validate':os.getenv('VALIDATE'),
+               'separate':os.getenv('SEPARATE'),'audio_analysis':os.getenv('AUDIO_ANALYSIS'),
+               'source_validation':val,
+               'report_exists':pathlib.Path('analysis/neiro/neiro_audio_report.json').exists()}
+          pathlib.Path('analysis/neiro/pipeline_status.json').write_text(json.dumps(out,ensure_ascii=False,indent=2))
+          print(json.dumps(out,indent=2))
+          PY
+
+      - name: Commit compact results back to repository
+        if: always()
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add analysis/neiro/pipeline_status.json analysis/neiro/neiro_audio_report.json 2>/dev/null || true
+          git diff --cached --quiet && exit 0
+          git commit -m 'analysis: update Neiro audio report'
+          git push
+
+      - name: Upload validated audio artifact
+        if: steps.audio_analysis.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: neiro-analysis
@@ -126,5 +284,4 @@ jobs:
             neiro_vocals.wav
             neiro_no_vocals.wav
             lrclib.json
-
-# retrigger 2026-10-15: no-YouTube pipeline
+            analysis/neiro/neiro_audio_report.json
